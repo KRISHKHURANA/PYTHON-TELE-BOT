@@ -1,6 +1,7 @@
 import logging
 import smtplib
 import os
+import sys
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
@@ -41,6 +42,9 @@ logger = logging.getLogger(__name__)
 async def send_email_with_attachment(file_path: str, filename: str) -> bool:
     """Send email with attachment to Brother printer"""
     try:
+        logger.info("Attempting to send email via Gmail SMTP...")
+        logger.info(f"From: {GMAIL_ADDRESS} To: {BROTHER_PRINTER_EMAIL}")
+        
         # Create message
         msg = MIMEMultipart()
         msg["From"] = GMAIL_ADDRESS
@@ -62,16 +66,21 @@ async def send_email_with_attachment(file_path: str, filename: str) -> bool:
             )
             msg.attach(part)
         
-        # Send email via Gmail SMTP
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        # Send email via Gmail SMTP using port 587 + STARTTLS
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            logger.info("Gmail login successful!")
             server.sendmail(GMAIL_ADDRESS, BROTHER_PRINTER_EMAIL, msg.as_string())
+            logger.info("Email sent successfully to printer!")
         
         logger.info(f"Successfully sent {filename} to printer")
         return True
         
     except Exception as e:
-        logger.error(f"Failed to send email: {e}")
+        logger.exception(f"Failed to send email: {e}")
         return False
 
 
@@ -102,8 +111,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(file_path)
             
     except Exception as e:
-        logger.error(f"Error handling photo: {e}")
-        await update.message.reply_text("❌ An error occurred while processing your photo.")
+        logger.exception(f"Error handling photo: {e}")
+        await update.message.reply_text(f"❌ Failed: {e}")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,8 +146,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(file_path)
             
     except Exception as e:
-        logger.error(f"Error handling document: {e}")
-        await update.message.reply_text("❌ An error occurred while processing your document.")
+        logger.exception(f"Error handling document: {e}")
+        await update.message.reply_text(f"❌ Failed: {e}")
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,18 +170,31 @@ Just send your file and I'll handle the rest! 📤
 def main():
     """Start the bot"""
     logger.info("Starting Telegram to Printer Bot...")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Current working directory: {os.getcwd()}")
     
-    # Create application
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Log environment info (without sensitive data)
+    logger.info(f"Telegram token configured: {'Yes' if TELEGRAM_TOKEN else 'No'}")
+    logger.info(f"Gmail address: {GMAIL_ADDRESS}")
+    logger.info(f"Printer email: {BROTHER_PRINTER_EMAIL}")
     
-    # Add handlers
-    app.add_handler(MessageHandler(filters.COMMAND & filters.Regex("^/start"), handle_start))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    
-    # Start polling
-    logger.info("Bot is running! Send photos or documents to print.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Create application
+        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        
+        # Add handlers
+        app.add_handler(MessageHandler(filters.COMMAND & filters.Regex("^/start"), handle_start))
+        app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        
+        # Start polling
+        logger.info("Bot is running! Send photos or documents to print.")
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        raise
 
 
 if __name__ == "__main__":

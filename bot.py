@@ -1,5 +1,4 @@
 import logging
-import smtplib
 import os
 import sys
 import base64
@@ -10,10 +9,9 @@ from email import encoders
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
-import json
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+import requests
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
 
 # Load environment variables
 load_dotenv()
@@ -23,6 +21,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 BROTHER_PRINTER_EMAIL = os.getenv("BROTHER_PRINTER_EMAIL")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 # Validate required environment variables
 required_vars = {
@@ -45,99 +44,87 @@ logger = logging.getLogger(__name__)
 
 
 async def send_email_with_attachment(file_path: str, filename: str) -> bool:
-    """Send email with attachment to Brother printer using Gmail API (Railway SMTP workaround)"""
+    """Send email with attachment to Brother printer using SendGrid API (Railway compatible)"""
     try:
-        logger.info("Attempting to send email via Gmail API (SMTP blocked on Railway)...")
+        logger.info("Attempting to send email via SendGrid API (Railway compatible)...")
         logger.info(f"From: {GMAIL_ADDRESS} To: {BROTHER_PRINTER_EMAIL}")
         
-        logger.info("Building email message...")
-        # Create message
-        msg = MIMEMultipart()
-        msg["From"] = GMAIL_ADDRESS
-        msg["To"] = BROTHER_PRINTER_EMAIL
-        msg["Subject"] = "Print"
+        # Try SendGrid API first (recommended for Railway)
+        if SENDGRID_API_KEY:
+            try:
+                logger.info("Using SendGrid API...")
+                
+                # Read and encode the file
+                with open(file_path, 'rb') as f:
+                    file_data = f.read()
+                    encoded_file = base64.b64encode(file_data).decode()
+                
+                # Create SendGrid message
+                message = Mail(
+                    from_email=GMAIL_ADDRESS,
+                    to_emails=BROTHER_PRINTER_EMAIL,
+                    subject='Print',
+                    html_content='Print request from Telegram Bot'
+                )
+                
+                # Add attachment
+                attachment = Attachment(
+                    FileContent(encoded_file),
+                    FileName(filename),
+                    FileType('application/octet-stream'),
+                    Disposition('attachment')
+                )
+                message.attachment = attachment
+                
+                # Send via SendGrid
+                sg = SendGridAPIClient(api_key=SENDGRID_API_KEY)
+                response = sg.send(message)
+                
+                logger.info(f"SendGrid response status: {response.status_code}")
+                if response.status_code == 202:
+                    logger.info("Email sent successfully via SendGrid! ✅")
+                    return True
+                else:
+                    logger.error(f"SendGrid failed with status: {response.status_code}")
+                    
+            except Exception as sendgrid_error:
+                logger.error(f"SendGrid failed: {sendgrid_error}")
         
-        # Add body text
-        body = "Print request from Telegram Bot"
-        msg.attach(MIMEText(body, "plain"))
-        
-        logger.info("Attaching file...")
-        # Attach file
-        with open(file_path, "rb") as attachment:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header(
-                "Content-Disposition",
-                f'attachment; filename="{filename}"'
-            )
-            msg.attach(part)
-        
-        # Fallback to SMTP first (in case Railway allows it)
-        logger.info("Trying SMTP first...")
+        # Fallback to direct HTTP email service
+        logger.info("Trying direct HTTP email service...")
         try:
-            logger.info("Connecting to smtp.gmail.com port 587...")
-            with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
-                logger.info("Running EHLO...")
-                server.ehlo()
-                logger.info("Starting TLS...")
-                server.starttls()
-                logger.info("Running EHLO again...")
-                server.ehlo()
-                logger.info("Logging into Gmail...")
-                server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-                logger.info("Gmail login successful!")
-                logger.info("Sending email...")
-                server.sendmail(GMAIL_ADDRESS, BROTHER_PRINTER_EMAIL, msg.as_string())
-                logger.info("Email sent successfully via SMTP! ✅")
-                return True
-        except Exception as smtp_error:
-            logger.warning(f"SMTP failed (expected on Railway): {smtp_error}")
-            logger.info("Falling back to alternative method...")
-            
-            # Alternative: Use requests to send via Gmail's web interface
-            import requests
-            
-            logger.info("Attempting alternative email delivery...")
-            
-            # Create a simple HTTP request to a webhook service
-            # This is a workaround for Railway's SMTP restrictions
-            webhook_data = {
+            # Use a simple email API service
+            email_data = {
                 "from": GMAIL_ADDRESS,
                 "to": BROTHER_PRINTER_EMAIL,
                 "subject": "Print",
-                "body": "Print request from Telegram Bot",
-                "filename": filename,
-                "gmail_user": GMAIL_ADDRESS,
-                "gmail_pass": GMAIL_APP_PASSWORD
+                "text": "Print request from Telegram Bot",
+                "filename": filename
             }
             
-            # Try multiple webhook services for email delivery
-            webhook_urls = [
+            # Try EmailJS or similar service
+            response = requests.post(
                 "https://api.emailjs.com/api/v1.0/email/send",
-                "https://formspree.io/f/xpznvqko",  # You'll need to set this up
-            ]
+                json=email_data,
+                timeout=30
+            )
             
-            for webhook_url in webhook_urls:
-                try:
-                    logger.info(f"Trying webhook: {webhook_url}")
-                    response = requests.post(webhook_url, json=webhook_data, timeout=30)
-                    if response.status_code == 200:
-                        logger.info("Email sent successfully via webhook! ✅")
-                        return True
-                except Exception as webhook_error:
-                    logger.warning(f"Webhook {webhook_url} failed: {webhook_error}")
-                    continue
-            
-            # Final fallback: Log the email content for manual processing
-            logger.error("All email methods failed. Logging email content for manual processing:")
-            logger.error(f"TO: {BROTHER_PRINTER_EMAIL}")
-            logger.error(f"FROM: {GMAIL_ADDRESS}")
-            logger.error(f"SUBJECT: Print")
-            logger.error(f"ATTACHMENT: {filename}")
-            logger.error("Email content logged. Manual intervention required.")
-            
-            return False
+            if response.status_code == 200:
+                logger.info("Email sent successfully via HTTP service! ✅")
+                return True
+            else:
+                logger.warning(f"HTTP email service failed: {response.status_code}")
+                
+        except Exception as http_error:
+            logger.error(f"HTTP email service failed: {http_error}")
+        
+        # Final fallback: Manual email notification
+        logger.error("All email methods failed. Railway blocks SMTP and no API key configured.")
+        logger.error("SOLUTION: Set up SendGrid API key in Railway environment variables")
+        logger.error(f"File to print: {filename}")
+        logger.error(f"Printer email: {BROTHER_PRINTER_EMAIL}")
+        
+        return False
         
     except Exception as e:
         logger.exception(f"Unexpected error in email function: {e}")
@@ -164,7 +151,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if success:
             await update.message.reply_text("✅ Photo sent to printer! It should print shortly. 🖨️")
         else:
-            await update.message.reply_text("❌ Failed to send photo to printer. Please try again.")
+            await update.message.reply_text("❌ Failed to send photo. Railway blocks SMTP. Need SendGrid API key.")
         
         # Clean up temporary file
         if os.path.exists(file_path):
@@ -204,7 +191,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if success:
             await update.message.reply_text("✅ Document sent to printer! It should print shortly. 🖨️")
         else:
-            await update.message.reply_text("❌ Failed to send document to printer. Please try again.")
+            await update.message.reply_text("❌ Failed to send document. Railway blocks SMTP. Need SendGrid API key.")
         
         # Clean up temporary file
         if os.path.exists(file_path):

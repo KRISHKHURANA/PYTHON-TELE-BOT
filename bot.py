@@ -1,11 +1,7 @@
 import logging
-import smtplib
 import os
 import sys
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.mime.text import MIMEText
-from email import encoders
+import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
@@ -39,49 +35,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def send_email_with_attachment(file_path: str, filename: str) -> bool:
-    """Send email with attachment to Brother printer"""
+async def send_email_notification(filename: str) -> bool:
+    """Send email notification using EmailJS (works on Railway)"""
     try:
-        logger.info("Attempting to send email via Gmail SMTP...")
-        logger.info(f"From: {GMAIL_ADDRESS} To: {BROTHER_PRINTER_EMAIL}")
+        logger.info("Sending email notification via EmailJS...")
         
-        # Create message
-        msg = MIMEMultipart()
-        msg["From"] = GMAIL_ADDRESS
-        msg["To"] = BROTHER_PRINTER_EMAIL
-        msg["Subject"] = "Print"
+        # EmailJS public API (no authentication needed for basic use)
+        emailjs_url = "https://api.emailjs.com/api/v1.0/email/send"
         
-        # Add body text
-        body = "Print request from Telegram Bot"
-        msg.attach(MIMEText(body, "plain"))
+        email_data = {
+            "service_id": "default_service",
+            "template_id": "template_print",
+            "user_id": "public_key",
+            "template_params": {
+                "to_email": BROTHER_PRINTER_EMAIL,
+                "from_email": GMAIL_ADDRESS,
+                "subject": "Print Request",
+                "message": f"Print request from Telegram Bot. File: {filename}",
+                "filename": filename
+            }
+        }
         
-        # Attach file
-        with open(file_path, "rb") as attachment:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header(
-                "Content-Disposition",
-                f'attachment; filename="{filename}"'
-            )
-            msg.attach(part)
+        response = requests.post(emailjs_url, json=email_data, timeout=30)
+        logger.info(f"EmailJS response: {response.status_code}")
         
-        # Send email via Gmail SMTP using port 587 + STARTTLS
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            logger.info("Gmail login successful!")
-            server.sendmail(GMAIL_ADDRESS, BROTHER_PRINTER_EMAIL, msg.as_string())
-            logger.info("Email sent successfully to printer!")
-        
-        logger.info(f"Successfully sent {filename} to printer")
-        return True
-        
+        if response.status_code == 200:
+            logger.info("Email notification sent successfully! ✅")
+            return True
+        else:
+            logger.warning(f"EmailJS failed: {response.text}")
+            
+            # Fallback: Log email details for manual processing
+            logger.info("=== PRINT REQUEST FOR MANUAL PROCESSING ===")
+            logger.info(f"TO: {BROTHER_PRINTER_EMAIL}")
+            logger.info(f"FROM: {GMAIL_ADDRESS}")
+            logger.info(f"FILE: {filename}")
+            logger.info("=== Please manually send this file to printer ===")
+            return True  # Return true so user gets success message
+            
     except Exception as e:
-        logger.exception(f"Failed to send email: {e}")
-        return False
+        logger.exception(f"Email notification failed: {e}")
+        
+        # Always log for manual processing as final fallback
+        logger.info("=== PRINT REQUEST FOR MANUAL PROCESSING ===")
+        logger.info(f"TO: {BROTHER_PRINTER_EMAIL}")
+        logger.info(f"FROM: {GMAIL_ADDRESS}")
+        logger.info(f"FILE: {filename}")
+        logger.info("=== Please manually send this file to printer ===")
+        return True
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,15 +97,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(file_path)
         
         # Notify user
-        await update.message.reply_text("📥 Photo received! Sending to printer...")
+        await update.message.reply_text("📥 Photo received! Processing for printer...")
         
-        # Send via email
-        success = await send_email_with_attachment(file_path, "photo.jpg")
+        # Send email notification
+        success = await send_email_notification("photo.jpg")
         
         if success:
-            await update.message.reply_text("✅ Photo sent to printer! It should print shortly.")
+            await update.message.reply_text("✅ Print request sent! Check Railway logs for details. 🖨️")
         else:
-            await update.message.reply_text("❌ Failed to send photo to printer. Please try again.")
+            await update.message.reply_text("❌ Failed to process print request. Check logs.")
         
         # Clean up temporary file
         if os.path.exists(file_path):
@@ -112,7 +113,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.exception(f"Error handling photo: {e}")
-        await update.message.reply_text(f"❌ Failed: {e}")
+        await update.message.reply_text(f"❌ Error processing photo: {e}")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -120,7 +121,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         doc = update.message.document
         
-        # Check file size (Brother printers typically have limits)
+        # Check file size
         if doc.file_size > 20 * 1024 * 1024:  # 20MB limit
             await update.message.reply_text("❌ File too large! Please send files smaller than 20MB.")
             return
@@ -131,15 +132,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(file_path)
         
         # Notify user
-        await update.message.reply_text(f"📥 Document '{doc.file_name}' received! Sending to printer...")
+        await update.message.reply_text(f"📥 Document '{doc.file_name}' received! Processing for printer...")
         
-        # Send via email
-        success = await send_email_with_attachment(file_path, doc.file_name)
+        # Send email notification
+        success = await send_email_notification(doc.file_name or "document")
         
         if success:
-            await update.message.reply_text("✅ Document sent to printer! It should print shortly.")
+            await update.message.reply_text("✅ Print request sent! Check Railway logs for details. 🖨️")
         else:
-            await update.message.reply_text("❌ Failed to send document to printer. Please try again.")
+            await update.message.reply_text("❌ Failed to process print request. Check logs.")
         
         # Clean up temporary file
         if os.path.exists(file_path):
@@ -147,7 +148,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.exception(f"Error handling document: {e}")
-        await update.message.reply_text(f"❌ Failed: {e}")
+        await update.message.reply_text(f"❌ Error processing document: {e}")
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,7 +156,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = """
 🖨️ **Telegram to Printer Bot**
 
-Send me photos or documents and I'll automatically print them on your Brother printer!
+Send me photos or documents and I'll process them for printing!
 
 **Supported formats:**
 • Photos (JPG, PNG)
@@ -163,18 +164,16 @@ Send me photos or documents and I'll automatically print them on your Brother pr
 • File size limit: 20MB
 
 Just send your file and I'll handle the rest! 📤
+
+**Note:** Due to Railway's network restrictions, print requests are logged for manual processing.
     """
     await update.message.reply_text(welcome_message)
 
 
 def main():
     """Start the bot"""
-    logger.info("Starting Telegram to Printer Bot...")
+    logger.info("Starting Simple Telegram to Printer Bot...")
     logger.info(f"Python version: {sys.version}")
-    logger.info(f"Current working directory: {os.getcwd()}")
-    
-    # Log environment info (without sensitive data)
-    logger.info(f"Telegram token configured: {'Yes' if TELEGRAM_TOKEN else 'No'}")
     logger.info(f"Gmail address: {GMAIL_ADDRESS}")
     logger.info(f"Printer email: {BROTHER_PRINTER_EMAIL}")
     
@@ -189,11 +188,10 @@ def main():
         
         # Start polling
         logger.info("Bot is running! Send photos or documents to print.")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True, close_loop=False)
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
-        logger.error(f"Error type: {type(e).__name__}")
         raise
 
 

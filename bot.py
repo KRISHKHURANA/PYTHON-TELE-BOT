@@ -45,6 +45,7 @@ async def send_email_with_attachment(file_path: str, filename: str) -> bool:
         logger.info("Attempting to send email via Gmail SMTP...")
         logger.info(f"From: {GMAIL_ADDRESS} To: {BROTHER_PRINTER_EMAIL}")
         
+        logger.info("Building email message...")
         # Create message
         msg = MIMEMultipart()
         msg["From"] = GMAIL_ADDRESS
@@ -55,6 +56,7 @@ async def send_email_with_attachment(file_path: str, filename: str) -> bool:
         body = "Print request from Telegram Bot"
         msg.attach(MIMEText(body, "plain"))
         
+        logger.info("Attaching file...")
         # Attach file
         with open(file_path, "rb") as attachment:
             part = MIMEBase("application", "octet-stream")
@@ -66,21 +68,33 @@ async def send_email_with_attachment(file_path: str, filename: str) -> bool:
             )
             msg.attach(part)
         
-        # Send email via Gmail SMTP using port 587 + STARTTLS
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        logger.info("Connecting to smtp.gmail.com port 587...")
+        # Send email via Gmail SMTP using port 587 + STARTTLS with timeout
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            logger.info("Running EHLO...")
             server.ehlo()
+            logger.info("Starting TLS...")
             server.starttls()
+            logger.info("Running EHLO again...")
             server.ehlo()
+            logger.info("Logging into Gmail...")
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
             logger.info("Gmail login successful!")
+            logger.info("Sending email...")
             server.sendmail(GMAIL_ADDRESS, BROTHER_PRINTER_EMAIL, msg.as_string())
-            logger.info("Email sent successfully to printer!")
+            logger.info("Email sent successfully to printer! ✅")
         
         logger.info(f"Successfully sent {filename} to printer")
         return True
         
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"Gmail authentication failed: {e}")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error: {e}")
+        return False
     except Exception as e:
-        logger.exception(f"Failed to send email: {e}")
+        logger.exception(f"Unexpected error: {e}")
         return False
 
 
@@ -102,7 +116,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = await send_email_with_attachment(file_path, "photo.jpg")
         
         if success:
-            await update.message.reply_text("✅ Photo sent to printer! It should print shortly.")
+            await update.message.reply_text("✅ Photo sent to printer! It should print shortly. 🖨️")
         else:
             await update.message.reply_text("❌ Failed to send photo to printer. Please try again.")
         
@@ -112,7 +126,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.exception(f"Error handling photo: {e}")
-        await update.message.reply_text(f"❌ Failed: {e}")
+        if "authentication" in str(e).lower():
+            await update.message.reply_text("❌ Gmail login failed. Check App Password.")
+        elif "smtp" in str(e).lower():
+            await update.message.reply_text(f"❌ SMTP error: {e}")
+        else:
+            await update.message.reply_text(f"❌ Unexpected error: {e}")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,7 +156,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = await send_email_with_attachment(file_path, doc.file_name)
         
         if success:
-            await update.message.reply_text("✅ Document sent to printer! It should print shortly.")
+            await update.message.reply_text("✅ Document sent to printer! It should print shortly. 🖨️")
         else:
             await update.message.reply_text("❌ Failed to send document to printer. Please try again.")
         
@@ -147,7 +166,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.exception(f"Error handling document: {e}")
-        await update.message.reply_text(f"❌ Failed: {e}")
+        if "authentication" in str(e).lower():
+            await update.message.reply_text("❌ Gmail login failed. Check App Password.")
+        elif "smtp" in str(e).lower():
+            await update.message.reply_text(f"❌ SMTP error: {e}")
+        else:
+            await update.message.reply_text(f"❌ Unexpected error: {e}")
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):

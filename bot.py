@@ -1,7 +1,7 @@
 import logging
+import smtplib
 import os
 import sys
-import base64
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
@@ -9,9 +9,6 @@ from email import encoders
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
-import requests
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
 
 # Load environment variables
 load_dotenv()
@@ -21,7 +18,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 BROTHER_PRINTER_EMAIL = os.getenv("BROTHER_PRINTER_EMAIL")
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 # Validate required environment variables
 required_vars = {
@@ -44,90 +40,47 @@ logger = logging.getLogger(__name__)
 
 
 async def send_email_with_attachment(file_path: str, filename: str) -> bool:
-    """Send email with attachment to Brother printer using SendGrid API (Railway compatible)"""
+    """Send email with attachment to Brother printer"""
     try:
-        logger.info("Attempting to send email via SendGrid API (Railway compatible)...")
+        logger.info("Attempting to send email via Gmail SMTP...")
         logger.info(f"From: {GMAIL_ADDRESS} To: {BROTHER_PRINTER_EMAIL}")
         
-        # Try SendGrid API first (recommended for Railway)
-        if SENDGRID_API_KEY:
-            try:
-                logger.info("Using SendGrid API...")
-                
-                # Read and encode the file
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
-                    encoded_file = base64.b64encode(file_data).decode()
-                
-                # Create SendGrid message
-                message = Mail(
-                    from_email=GMAIL_ADDRESS,
-                    to_emails=BROTHER_PRINTER_EMAIL,
-                    subject='Print',
-                    html_content='Print request from Telegram Bot'
-                )
-                
-                # Add attachment
-                attachment = Attachment(
-                    FileContent(encoded_file),
-                    FileName(filename),
-                    FileType('application/octet-stream'),
-                    Disposition('attachment')
-                )
-                message.attachment = attachment
-                
-                # Send via SendGrid
-                sg = SendGridAPIClient(api_key=SENDGRID_API_KEY)
-                response = sg.send(message)
-                
-                logger.info(f"SendGrid response status: {response.status_code}")
-                if response.status_code == 202:
-                    logger.info("Email sent successfully via SendGrid! ✅")
-                    return True
-                else:
-                    logger.error(f"SendGrid failed with status: {response.status_code}")
-                    
-            except Exception as sendgrid_error:
-                logger.error(f"SendGrid failed: {sendgrid_error}")
+        # Create message
+        msg = MIMEMultipart()
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = BROTHER_PRINTER_EMAIL
+        msg["Subject"] = "Print"
         
-        # Fallback to direct HTTP email service
-        logger.info("Trying direct HTTP email service...")
-        try:
-            # Use a simple email API service
-            email_data = {
-                "from": GMAIL_ADDRESS,
-                "to": BROTHER_PRINTER_EMAIL,
-                "subject": "Print",
-                "text": "Print request from Telegram Bot",
-                "filename": filename
-            }
-            
-            # Try EmailJS or similar service
-            response = requests.post(
-                "https://api.emailjs.com/api/v1.0/email/send",
-                json=email_data,
-                timeout=30
+        # Add body text
+        body = "Print request from Telegram Bot"
+        msg.attach(MIMEText(body, "plain"))
+        
+        # Attach file
+        with open(file_path, "rb") as attachment:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                f'attachment; filename="{filename}"'
             )
-            
-            if response.status_code == 200:
-                logger.info("Email sent successfully via HTTP service! ✅")
-                return True
-            else:
-                logger.warning(f"HTTP email service failed: {response.status_code}")
-                
-        except Exception as http_error:
-            logger.error(f"HTTP email service failed: {http_error}")
+            msg.attach(part)
         
-        # Final fallback: Manual email notification
-        logger.error("All email methods failed. Railway blocks SMTP and no API key configured.")
-        logger.error("SOLUTION: Set up SendGrid API key in Railway environment variables")
-        logger.error(f"File to print: {filename}")
-        logger.error(f"Printer email: {BROTHER_PRINTER_EMAIL}")
+        # Send email via Gmail SMTP using port 587 + STARTTLS
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            logger.info("Gmail login successful!")
+            server.sendmail(GMAIL_ADDRESS, BROTHER_PRINTER_EMAIL, msg.as_string())
+            logger.info("Email sent successfully to printer!")
         
-        return False
+        logger.info(f"Successfully sent {filename} to printer")
+        return True
         
     except Exception as e:
-        logger.exception(f"Unexpected error in email function: {e}")
+        logger.exception(f"Failed to send email: {e}")
         return False
 
 
@@ -149,9 +102,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = await send_email_with_attachment(file_path, "photo.jpg")
         
         if success:
-            await update.message.reply_text("✅ Photo sent to printer! It should print shortly. 🖨️")
+            await update.message.reply_text("✅ Photo sent to printer! It should print shortly.")
         else:
-            await update.message.reply_text("❌ Failed to send photo. Railway blocks SMTP. Need SendGrid API key.")
+            await update.message.reply_text("❌ Failed to send photo to printer. Please try again.")
         
         # Clean up temporary file
         if os.path.exists(file_path):
@@ -159,12 +112,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.exception(f"Error handling photo: {e}")
-        if "authentication" in str(e).lower():
-            await update.message.reply_text("❌ Gmail login failed. Check App Password.")
-        elif "smtp" in str(e).lower():
-            await update.message.reply_text(f"❌ SMTP error: {e}")
-        else:
-            await update.message.reply_text(f"❌ Unexpected error: {e}")
+        await update.message.reply_text(f"❌ Failed: {e}")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,9 +137,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = await send_email_with_attachment(file_path, doc.file_name)
         
         if success:
-            await update.message.reply_text("✅ Document sent to printer! It should print shortly. 🖨️")
+            await update.message.reply_text("✅ Document sent to printer! It should print shortly.")
         else:
-            await update.message.reply_text("❌ Failed to send document. Railway blocks SMTP. Need SendGrid API key.")
+            await update.message.reply_text("❌ Failed to send document to printer. Please try again.")
         
         # Clean up temporary file
         if os.path.exists(file_path):
@@ -199,12 +147,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.exception(f"Error handling document: {e}")
-        if "authentication" in str(e).lower():
-            await update.message.reply_text("❌ Gmail login failed. Check App Password.")
-        elif "smtp" in str(e).lower():
-            await update.message.reply_text(f"❌ SMTP error: {e}")
-        else:
-            await update.message.reply_text(f"❌ Unexpected error: {e}")
+        await update.message.reply_text(f"❌ Failed: {e}")
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,7 +189,7 @@ def main():
         
         # Start polling
         logger.info("Bot is running! Send photos or documents to print.")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True, close_loop=False)
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")

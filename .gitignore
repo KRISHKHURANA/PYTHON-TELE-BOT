@@ -1,43 +1,15 @@
-# Environment variables
+# Environment variables - NEVER upload this
 .env
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Logs
+*.log
 
-# Temporary files
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp files
 *.jpg
 *.png
 *.pdf
-*.doc
-*.docx
-photo_*
-document_*
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db

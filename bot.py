@@ -1,198 +1,159 @@
+#!/usr/bin/env python3
+"""
+Telegram to Printer Bot
+Receives photos via Telegram and emails them to a Brother printer via Gmail SMTP
+"""
+
 import logging
+import smtplib
 import os
 import sys
-import requests
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from .env file (local development only)
 load_dotenv()
 
-# Configuration from environment variables
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
-BROTHER_PRINTER_EMAIL = os.getenv("BROTHER_PRINTER_EMAIL")
+# Credentials loaded from environment variables - never hardcoded
+TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN")
+GMAIL_ADDRESS       = os.getenv("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD  = os.getenv("GMAIL_APP_PASSWORD")
+PRINTER_EMAIL       = os.getenv("PRINTER_EMAIL")
 
-# Validate required environment variables
-required_vars = {
-    "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
-    "GMAIL_ADDRESS": GMAIL_ADDRESS,
+# Validate all required env vars are present
+missing = [k for k, v in {
+    "TELEGRAM_TOKEN":     TELEGRAM_TOKEN,
+    "GMAIL_ADDRESS":      GMAIL_ADDRESS,
     "GMAIL_APP_PASSWORD": GMAIL_APP_PASSWORD,
-    "BROTHER_PRINTER_EMAIL": BROTHER_PRINTER_EMAIL
-}
+    "PRINTER_EMAIL":      PRINTER_EMAIL,
+}.items() if not v]
 
-for var_name, var_value in required_vars.items():
-    if not var_value:
-        raise ValueError(f"Missing required environment variable: {var_name}")
+if missing:
+    print(f"ERROR: Missing environment variables: {', '.join(missing)}")
+    print("Set them in .env file (local) or Render dashboard (production)")
+    sys.exit(1)
+
+# Thread pool - runs SMTP in background so it never blocks Telegram
+executor = ThreadPoolExecutor(max_workers=2)
 
 # Configure logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 
-async def send_email_notification(filename: str) -> bool:
-    """Send email notification using EmailJS (works on Railway)"""
+def send_email_sync(file_path: str, filename: str) -> tuple:
+    """Synchronous email sending - runs in thread pool"""
     try:
-        logger.info("Sending email notification via EmailJS...")
-        
-        # EmailJS public API (no authentication needed for basic use)
-        emailjs_url = "https://api.emailjs.com/api/v1.0/email/send"
-        
-        email_data = {
-            "service_id": "default_service",
-            "template_id": "template_print",
-            "user_id": "public_key",
-            "template_params": {
-                "to_email": BROTHER_PRINTER_EMAIL,
-                "from_email": GMAIL_ADDRESS,
-                "subject": "Print Request",
-                "message": f"Print request from Telegram Bot. File: {filename}",
-                "filename": filename
-            }
-        }
-        
-        response = requests.post(emailjs_url, json=email_data, timeout=30)
-        logger.info(f"EmailJS response: {response.status_code}")
-        
-        if response.status_code == 200:
-            logger.info("Email notification sent successfully! ✅")
-            return True
-        else:
-            logger.warning(f"EmailJS failed: {response.text}")
-            
-            # Fallback: Log email details for manual processing
-            logger.info("=== PRINT REQUEST FOR MANUAL PROCESSING ===")
-            logger.info(f"TO: {BROTHER_PRINTER_EMAIL}")
-            logger.info(f"FROM: {GMAIL_ADDRESS}")
-            logger.info(f"FILE: {filename}")
-            logger.info("=== Please manually send this file to printer ===")
-            return True  # Return true so user gets success message
-            
+        logger.info("Starting email send process...")
+        logger.info(f"From: {GMAIL_ADDRESS}  To: {PRINTER_EMAIL}")
+
+        # Build email with only the photo attachment (no body = no extra printed page)
+        msg = MIMEMultipart()
+        msg["From"]    = GMAIL_ADDRESS
+        msg["To"]      = PRINTER_EMAIL
+        msg["Subject"] = "Print"
+
+        with open(file_path, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+            msg.attach(part)
+
+        # Send via Gmail SMTP port 587 + STARTTLS
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            logger.info("Gmail login successful!")
+            server.sendmail(GMAIL_ADDRESS, PRINTER_EMAIL, msg.as_string())
+            logger.info("Email sent successfully!")
+
+        return True, "Email sent successfully!"
+
+    except smtplib.SMTPAuthenticationError:
+        logger.error("Gmail authentication failed - check App Password")
+        return False, "Gmail authentication failed. Check App Password."
+    except smtplib.SMTPConnectError:
+        logger.error("Cannot connect to Gmail SMTP")
+        return False, "Cannot connect to Gmail SMTP."
+    except TimeoutError:
+        logger.error("SMTP connection timed out")
+        return False, "Connection timed out. SMTP may be blocked."
     except Exception as e:
-        logger.exception(f"Email notification failed: {e}")
-        
-        # Always log for manual processing as final fallback
-        logger.info("=== PRINT REQUEST FOR MANUAL PROCESSING ===")
-        logger.info(f"TO: {BROTHER_PRINTER_EMAIL}")
-        logger.info(f"FROM: {GMAIL_ADDRESS}")
-        logger.info(f"FILE: {filename}")
-        logger.info("=== Please manually send this file to printer ===")
-        return True
+        logger.exception(f"Unexpected error: {e}")
+        return False, f"Error: {str(e)[:100]}"
+
+
+async def send_email_with_attachment(file_path: str, filename: str) -> tuple:
+    """Run email sending in thread pool to avoid blocking Telegram"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, send_email_sync, file_path, filename)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle photo messages from Telegram"""
+    """Handle incoming photo messages"""
     try:
-        # Get the highest quality photo
-        photo = update.message.photo[-1]
-        
-        # Download photo
-        file = await context.bot.get_file(photo.file_id)
-        file_path = f"photo_{photo.file_id}.jpg"
+        logger.info("Photo received from Telegram")
+
+        photo = update.message.photo[-1]  # highest quality
+        file  = await context.bot.get_file(photo.file_id)
+
+        # Use /tmp on Linux (Render) and current dir on Windows
+        tmp_dir = "/tmp" if os.name != "nt" else os.getcwd()
+        file_path = os.path.join(tmp_dir, f"photo_{photo.file_id}.jpg")
         await file.download_to_drive(file_path)
-        
-        # Notify user
-        await update.message.reply_text("📥 Photo received! Processing for printer...")
-        
-        # Send email notification
-        success = await send_email_notification("photo.jpg")
-        
+
+        await update.message.reply_text("Photo received! Sending to printer...")
+
+        success, message = await send_email_with_attachment(file_path, "photo.jpg")
+
         if success:
-            await update.message.reply_text("✅ Print request sent! Check Railway logs for details. 🖨️")
+            await update.message.reply_text("Photo sent to printer! It should print shortly.")
         else:
-            await update.message.reply_text("❌ Failed to process print request. Check logs.")
-        
-        # Clean up temporary file
+            await update.message.reply_text(f"Failed: {message}")
+
         if os.path.exists(file_path):
             os.remove(file_path)
-            
+
     except Exception as e:
         logger.exception(f"Error handling photo: {e}")
-        await update.message.reply_text(f"❌ Error processing photo: {e}")
-
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle document messages from Telegram"""
-    try:
-        doc = update.message.document
-        
-        # Check file size
-        if doc.file_size > 20 * 1024 * 1024:  # 20MB limit
-            await update.message.reply_text("❌ File too large! Please send files smaller than 20MB.")
-            return
-        
-        # Download document
-        file = await context.bot.get_file(doc.file_id)
-        file_path = doc.file_name or f"document_{doc.file_id}"
-        await file.download_to_drive(file_path)
-        
-        # Notify user
-        await update.message.reply_text(f"📥 Document '{doc.file_name}' received! Processing for printer...")
-        
-        # Send email notification
-        success = await send_email_notification(doc.file_name or "document")
-        
-        if success:
-            await update.message.reply_text("✅ Print request sent! Check Railway logs for details. 🖨️")
-        else:
-            await update.message.reply_text("❌ Failed to process print request. Check logs.")
-        
-        # Clean up temporary file
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            
-    except Exception as e:
-        logger.exception(f"Error handling document: {e}")
-        await update.message.reply_text(f"❌ Error processing document: {e}")
+        await update.message.reply_text(f"Error: {str(e)[:100]}")
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
-    welcome_message = """
-🖨️ **Telegram to Printer Bot**
-
-Send me photos or documents and I'll process them for printing!
-
-**Supported formats:**
-• Photos (JPG, PNG)
-• Documents (PDF, PNG, JPG files)
-• File size limit: 20MB
-
-Just send your file and I'll handle the rest! 📤
-
-**Note:** Due to Railway's network restrictions, print requests are logged for manual processing.
-    """
-    await update.message.reply_text(welcome_message)
+    await update.message.reply_text(
+        "Telegram Printer Bot\n\n"
+        "Send me a photo and I will print it on your Brother printer!\n\n"
+        "Just send a photo to get started."
+    )
 
 
 def main():
     """Start the bot"""
-    logger.info("Starting Simple Telegram to Printer Bot...")
-    logger.info(f"Python version: {sys.version}")
-    logger.info(f"Gmail address: {GMAIL_ADDRESS}")
-    logger.info(f"Printer email: {BROTHER_PRINTER_EMAIL}")
-    
-    try:
-        # Create application
-        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        
-        # Add handlers
-        app.add_handler(MessageHandler(filters.COMMAND & filters.Regex("^/start"), handle_start))
-        app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-        app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-        
-        # Start polling
-        logger.info("Bot is running! Send photos or documents to print.")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-        
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        raise
+    logger.info("Starting Telegram Printer Bot...")
+    logger.info(f"Gmail: {GMAIL_ADDRESS}")
+    logger.info(f"Printer: {PRINTER_EMAIL}")
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.COMMAND, handle_start))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    logger.info("Bot is running! Send photos to print.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
